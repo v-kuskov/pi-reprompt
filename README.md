@@ -11,7 +11,7 @@ message of a new, empty context. It is `/new` in the model's hands.
 ## Install
 
 ```bash
-pi install npm:pi-extension-reprompt
+pi install git:github.com/v-kuskov/pi-reprompt
 ```
 
 Or run it straight from a checkout, without installing:
