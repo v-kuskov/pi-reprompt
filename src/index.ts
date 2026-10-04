@@ -7,6 +7,18 @@
  * extension replaces the session and delivers that prompt as its first user
  * message — the effect of `/new` followed by the user typing it.
  *
+ * ## Why the first message is compacted
+ *
+ * A prompt the model writes for itself is a prompt it can also write guardrails
+ * out of. So the context being left is compacted into a checkpoint by a second
+ * model, in a fixed shape that carries guardrails as a section of its own, and
+ * the model's prompt is appended below it. The model still decides what to do
+ * next; it no longer decides what it is allowed to do.
+ *
+ * The prompt is appended after compaction, never given to the compactor: a
+ * compactor shown it would fold it into the checkpoint and reword it. The
+ * checkpoint policy is in `./compact.ts`.
+ *
  * ## Why the tool stages instead of restarting
  *
  * Session replacement belongs to pi's command context, not to a tool or a
@@ -29,11 +41,119 @@
  * be tested without starting a session.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	convertToLlm,
+	type ExtensionContext,
+	type ExtensionAPI,
+	serializeConversation,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	buildCompactionPrompt,
+	checkpointFrom,
+	composeSeed,
+	parseProviderModel,
+	readCompactSettings,
+	type CompactSettings,
+} from "./compact.ts";
 import { dispatchName, runCompleted, Seed, selectPrompt, type TranscriptEntry } from "./seed.ts";
 
 const RESTART_COMMAND = "reprompt";
+
+/** The compactor's model, or `{}` when nothing usable is configured. */
+function readModelSetting(cwd: string): CompactSettings {
+	try {
+		const settings = SettingsManager.create(cwd);
+		// pi's `Settings` has no key for this, but unknown top-level keys survive a
+		// load, so the whole scoped object is handed over rather than a named field.
+		return readCompactSettings(
+			settings.getProjectSettings() as Record<string, unknown>,
+			settings.getGlobalSettings() as Record<string, unknown>,
+		);
+	} catch {
+		// An unreadable settings file means "nothing configured", not a failed restart.
+		return {};
+	}
+}
+
+/** One user message for the compactor, in the shape `complete()` expects. */
+function compactorMessage(text: string) {
+	return { role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() };
+}
+
+/**
+ * Compact the ending context into the checkpoint that opens the next one.
+ *
+ * Returns undefined on every failure rather than throwing: the restart was
+ * asked for and the model's prompt is already written, so losing it because a
+ * summary call went wrong would be the worse outcome. A checkpoint is a
+ * guardrail against the model dropping its own constraints, not a precondition
+ * for restarting, so the caller restarts either way and the reason is reported.
+ */
+async function compactContext(ctx: ExtensionContext): Promise<string | undefined> {
+	const configured = readModelSetting(ctx.cwd).model;
+	let model = ctx.model;
+
+	if (configured !== undefined) {
+		const parsed = parseProviderModel(configured);
+		if (parsed === undefined) {
+			ctx.ui.notify(`Compaction model "${configured}" is not in provider/model form; using the session model.`, "warning");
+		} else {
+			const found = ctx.modelRegistry.find(parsed.provider, parsed.modelId);
+			if (found === undefined) {
+				ctx.ui.notify(`Compaction model "${configured}" names no known model; using the session model.`, "warning");
+			} else if (!ctx.modelRegistry.hasConfiguredAuth(found)) {
+				ctx.ui.notify(`No credentials for compaction model "${configured}"; using the session model.`, "warning");
+			} else {
+				model = found;
+			}
+		}
+	}
+
+	if (model === undefined || model === null) {
+		ctx.ui.notify("No model to compact with; restarting on your prompt alone.", "warning");
+		return undefined;
+	}
+
+	// The session projection is what the model actually sees: it already honours
+	// compaction entries and context edits, so compacting it cannot resurrect
+	// history a previous compaction removed.
+	const messages = convertToLlm(ctx.sessionManager.buildSessionProjection().messages);
+	if (messages.length === 0) return undefined;
+
+	let answer: string;
+	try {
+		const response = await ctx.modelRegistry.complete(
+			model,
+			{ messages: [compactorMessage(buildCompactionPrompt(serializeConversation(messages)))] },
+			// The prompt is sent once and never repeated, so a cached prefix would be
+			// paid for and never read.
+			{ cacheRetention: "none", signal: ctx.signal },
+		);
+		if (response.stopReason === "error") {
+			ctx.ui.notify(
+				`Compaction failed (${response.errorMessage ?? "the model returned an error"}); restarting on your prompt alone.`,
+				"warning",
+			);
+			return undefined;
+		}
+		answer = response.content
+			.filter((part): part is { type: "text"; text: string } => part.type === "text")
+			.map((part) => part.text)
+			.join("\n");
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		ctx.ui.notify(`Compaction failed (${reason}); restarting on your prompt alone.`, "warning");
+		return undefined;
+	}
+
+	const checkpoint = checkpointFrom(answer);
+	if (checkpoint === undefined) {
+		ctx.ui.notify("The compactor returned nothing usable; restarting on your prompt alone.", "warning");
+	}
+	return checkpoint;
+}
 
 export default function (pi: ExtensionAPI) {
 	const seed = new Seed();
@@ -54,7 +174,7 @@ export default function (pi: ExtensionAPI) {
 		name: RESTART_COMMAND,
 		label: "Reprompt",
 		description:
-			"Restart this session in a fresh context. `prompt` becomes the first user message of the new context; everything else here is discarded.",
+			"Restart this session in a fresh context. The context being left is compacted into a checkpoint — task, guardrails, current state, what is done, next task — and `prompt` is appended below it as the instruction to act on; the rest is discarded.",
 		promptSnippet: "Restart the session in a fresh context with a prompt you write",
 		promptGuidelines: [
 			"Call `reprompt` when a plan or a plan step is finished and the work that follows should begin in a clean context.",
@@ -62,7 +182,7 @@ export default function (pi: ExtensionAPI) {
 		parameters: Type.Object({
 			prompt: Type.String({
 				description:
-					"Self-contained, for a reader who has never seen this conversation: the goal, the constraints, what is already done, and the next action to take.",
+					"The instruction that opens the new context, appended below the checkpoint of the context being left. Write it as a directive for a reader who has never seen this conversation: what to do next, and what would count as done. Guardrails, history, and discoveries are carried by the checkpoint, so restate one only if you need it stated differently.",
 			}),
 		}),
 
@@ -80,7 +200,7 @@ export default function (pi: ExtensionAPI) {
 				content: [
 					{
 						type: "text",
-						text: "Restarting. `prompt` becomes the first user message of the fresh context; this context ends here.",
+						text: "Restarting. The context is compacted into a checkpoint and `prompt` is appended below it; this context ends here.",
 					},
 				],
 				details: undefined,
@@ -100,11 +220,15 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const parentSession = ctx.sessionManager.getSessionFile();
+			// Compact before replacing anything: the context being left is the only
+			// place the checkpoint can come from, and `newSession` tears it down.
+			const checkpoint = await compactContext(ctx);
+			const message = composeSeed(checkpoint, prompt);
 			try {
 				const { cancelled } = await ctx.newSession({
 					parentSession,
 					withSession: async (replacement) => {
-						await replacement.sendUserMessage(prompt);
+						await replacement.sendUserMessage(message);
 					},
 				});
 				if (cancelled) {

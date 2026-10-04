@@ -16,8 +16,10 @@ settlement through an extension command.
 | Path | Holds |
 |---|---|
 | `src/seed.ts` | The restart policy: when a run completed, how a seed is staged and claimed, which prompt an invocation uses, and which name to dispatch by. No pi imports, so it is directly testable. |
-| `src/index.ts` | The extension: the `reprompt` tool, the `/reprompt` command, and the `agent_settled` handler that delivers one through the other. Thin — the decisions live in `src/seed.ts`. |
+| `src/compact.ts` | The compaction policy: the prompt the compactor is given, how a checkpoint is read back, how it is composed with the model's prompt to form the seed, and which model to compact with. No pi imports, so it is directly testable. |
+| `src/index.ts` | The extension: the `reprompt` tool, the `/reprompt` command, the `agent_settled` handler that delivers one through the other, and the model call that produces the checkpoint. Thin — the decisions live in `src/seed.ts` and `src/compact.ts`. |
 | `test/seed.test.ts` | Tests for the restart policy. |
+| `test/compact.test.ts` | Tests for the compaction policy. |
 
 ## Commands
 
@@ -65,7 +67,9 @@ breaks delivery in ways the unit tests cannot catch.
 - **Session replacement is command-only.** `newSession()` exists on
   `ExtensionCommandContext` and nowhere else; calling it from a tool or a
   lifecycle handler deadlocks the runtime. That is why the tool stages instead
-  of restarting, and why settlement dispatches a command.
+  of restarting, and why settlement dispatches a command. Compaction runs in the
+  command handler for the same reason: it is the last moment the context being
+  left still exists.
 - **A prompt raised during `agent_settled` is deferred** until settlement
   finishes. This is what makes dispatching from the handler safe.
 - **Dispatch requires a registered command name, matched exactly.**
@@ -91,6 +95,11 @@ breaks delivery in ways the unit tests cannot catch.
   or a project `.pi/SYSTEM.md`) skips both sections entirely. So the description
   must carry anything the model has to know to call the tool correctly, and the
   snippet and guidelines are refinements for the default prompt only.
+- **Unknown top-level settings keys survive a load.** pi's `Settings` interface
+  has no `reprompt` key, but a project or agent-directory `settings.json` is not
+  filtered, so `reprompt.model` reads back intact (verified with a probe against
+  `SettingsManager`). That is where the compactor's model is read from — this
+  extension's own key, so naming a model there affects nothing else.
 
 ## Conventions
 

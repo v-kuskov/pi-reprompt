@@ -5,8 +5,10 @@ opening a fresh context with a prompt it writes.
 
 A model works better from a clear prompt than from the conversation that led to
 it. Once a plan is settled, or a plan step is done, the model can call
-`reprompt` with a self-contained prompt; that prompt becomes the first user
-message of a new, empty context. It is `/new` in the model's hands.
+`reprompt` with a prompt describing the next step. The old context is compacted
+into a checkpoint — guardrails included — and that prompt is appended below it as
+the first user message of a new, empty context. It is `/new` in the model's
+hands, with the part of the old context worth keeping carried across.
 
 ## Install
 
@@ -28,17 +30,20 @@ work to a clean context when the plan is ready:
 > Plan how to add rate limiting to the API. When the plan is ready, use
 > `reprompt` to start implementing it.
 
-The model plans, then calls `reprompt` with the plan as its argument. Your
-session ends; a fresh one opens with that plan as its first message, and the
-implementation begins with a clean context instead of the whole planning
-conversation.
+The model plans, then calls `reprompt` with the implementation step as its
+argument. A checkpoint of the planning context — the plan, your constraints,
+what is settled — is written first, and the model's prompt is appended below it.
+Your session ends; a fresh one opens with that message, and the implementation
+begins with a clean context instead of the whole planning conversation.
 
 This pays off whenever the reasoning that produced a prompt is worth less than
-the prompt itself:
+the prompt itself, while the constraints around it still have to hold:
 
-- **Work starts after planning.** The plan survives; the deliberation does not.
+- **Work starts after planning.** The plan and your guardrails survive; the
+  deliberation does not.
 - **Each step of a multi-step plan.** One step per context, so attention stays
-  on the step in front of it.
+  on the step in front of it, and a constraint stated at the start is still in
+  force at the end.
 - **A long thread has drifted.** The model restates what matters and starts over.
 
 ## By hand
@@ -51,18 +56,74 @@ You can restart yourself, with or without the model's help:
 
 With no argument, `/reprompt` uses a prompt the model staged; if there is none,
 it tells you there is nothing to restart with. A prompt you type yourself is
-never mixed up with a staged one.
+never mixed up with a staged one. Either way the context is compacted first, so
+a hand-typed prompt also arrives below a checkpoint rather than alone.
 
 ## What the model passes
 
 | Parameter | Description |
 |---|---|
-| `prompt` | The first user message of the new context. It must stand alone — goal, constraints, what is already done, next action — because the context it replaces is gone. |
+| `prompt` | The instruction that opens the new context, appended below the checkpoint of the one being left. Guardrails, history, and discoveries arrive in the checkpoint, so it states what to do next and what would count as done. |
+
+## The checkpoint
+
+A prompt the model writes for itself is a prompt it can also write its own
+constraints out of. So the context being left is compacted first, by a second
+model, into a checkpoint with a fixed shape:
+
+```
+## Task
+## Guardrails
+## Current State
+## Done
+## Next Task
+## Critical Context
+```
+
+Guardrails are a section of their own rather than a line buried in prose,
+because they are the part a restart must not lose — instructions from you, from
+an `AGENTS.md`, or from a system prompt, quoted rather than paraphrased.
+
+The model's `prompt` is appended **below** the checkpoint, outside the
+compaction prompt. That order is the point: the model still decides what to do
+next, but no longer decides what it is allowed to do. A compactor shown the
+prompt would fold it into the checkpoint and reword it, which is exactly what
+must not happen.
+
+The new context's first user message therefore looks like:
+
+```
+<reprompt-checkpoint>
+## Task
+…
+</reprompt-checkpoint>
+
+<the model's prompt>
+```
+
+If the compaction fails — no model, a provider error, an unusable answer — you
+are told why, and the restart goes ahead on the model's prompt alone. A restart
+the model asked for is never stranded by a summary call.
+
+### Choosing the model
+
+The compactor is read from pi's own `settings.json`, under this extension's
+key, `reprompt.model`:
+
+```json
+{ "reprompt": { "model": "routerai/deepseek/deepseek-v4.1-flash" } }
+```
+
+The extension owns the key: naming a model here affects nothing but this
+extension's compaction. A project `.pi/settings.json` wins field by field. With
+no key set, the session's own model compacts. A key that names an unknown or
+unauthenticated model is reported and the session model is used instead, so a
+stale setting cannot block a restart.
 
 ## Behavior
 
-- The prompt becomes the **first user message** of the new context, after pi's
-  system prompt and before anything else.
+- The new context's **first user message** is the checkpoint of the context
+  being left, followed by the model's prompt.
 - The restart happens **after the current run ends**, so the model's reply
   explaining the handoff still reaches you and the transcript stays well-formed.
 - A run you **abort** (Esc), that **fails**, or that was **cut off** before its

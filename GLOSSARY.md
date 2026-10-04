@@ -3,8 +3,30 @@
 ## Seed
 
 The prompt that opens a replacement session: the first user message of the new
-context. The model writes it, and it has to stand alone, because the session it
-replaces is gone by the time it is read.
+context. The model writes the prompt half of it, and it has to stand alone,
+because the session it replaces is gone by the time it is read.
+
+## Checkpoint
+
+The compacted form of the context being left: task, guardrails, current state,
+what is done, the next task, and critical context. A second model writes it, in a
+shape this extension fixes. Guardrails are a section of their own because they
+are the part a restart must not lose — a prompt the model writes for itself is a
+prompt it could also write its own constraints out of.
+
+## Guardrail
+
+An instruction that must keep applying after a restart: something the user
+asked for, a rule from an `AGENTS.md`, a security-relevant requirement, a
+forbidden action, an approval gate. Checkpoints quote guardrails rather than
+paraphrasing them, and they are never left for the model's own prompt to restate.
+
+## Compaction prompt
+
+The prompt sent to the compactor to produce a checkpoint. It carries the
+conversation and never the model's prompt: a compactor shown the prompt would
+fold it into the checkpoint and reword it. The prompt is appended to the
+checkpoint afterwards, outside the compactor's control.
 
 ## Restart
 

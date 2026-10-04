@@ -34,12 +34,69 @@ is how pi reaches a command, and a name that is not registered would be
 delivered to the model as ordinary text instead, leaving the dispatch
 unperformed.
 
-## Why not compact
+## Why not compact instead of restarting
 
 A compaction is a summary of the old context; a restart is a prompt written for
 the new one. The point of the feature is that the model decides what the next
 context contains, which a summarizer does not do. Compaction also keeps recent
 messages, so the context is reduced, not clean.
+
+## Compacted, then restarted
+
+Status: accepted (supersedes the restart-only decision above for the content of
+the seed)
+
+### Context
+
+Letting the model write the whole first message is a security hole: a prompt the
+model writes for itself is a prompt it can also write its own guardrails out of.
+The restart also loses everything the old context knew — the user's constraints,
+what was already tried, which files matter.
+
+### Decision
+
+Before replacing the session, the command handler compacts the context being
+left through a second model call, into a checkpoint with a fixed shape:
+
+```
+## Task
+## Guardrails
+## Current State
+## Done
+## Next Task
+## Critical Context
+```
+
+Guardrails are a section of their own, quoted rather than paraphrased. The
+model's prompt is appended **below** the checkpoint and is never given to the
+compactor: a compactor shown it would fold it into the checkpoint and reword it.
+The first user message of the new session is therefore checkpoint, then prompt.
+
+The compactor's model comes from `reprompt.model` in pi's settings — this
+extension's own key, so it cannot collide with another extension's idea of a
+summarizing model — falling back to the session model. Compaction runs in the
+command handler rather than at settlement because that is the last point at
+which the context being left still exists — `newSession()` tears it down before
+the prompt is sent.
+
+A compaction failure does not cancel the restart. The request came from the
+model or the user, the prompt is already written, and a summary call is the
+wrong thing to lose it to; the reason is reported and the restart proceeds on
+the prompt alone.
+
+### Consequences
+
+- The model keeps control of *what to do next* and loses control of *what it is
+allowed to do* — which is the point.
+- Restarting costs one model call, on the compactor's model rather than the
+session's when one is configured.
+- The checkpoint is written by a model, so it can still drop a guardrail. This
+reduces the risk; it does not remove it.
+- A failed compaction degrades to the previous behaviour — the prompt alone —
+rather than failing the restart.
+- The session projection (`buildSessionProjection()`) is what gets compacted, not
+`getBranch()`. The projection already honours compaction entries and context
+edits, so compacting it cannot resurrect history a previous compaction removed.
 
 ## Consequences
 
