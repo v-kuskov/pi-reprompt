@@ -1,0 +1,43 @@
+{
+	"name": "pi-extension-reprompt",
+	"version": "1.0.0",
+	"description": "Give the model a tool to restart its own session with a fresh, self-written prompt.",
+	"license": "GPL-3.0-or-later",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/v-kuskov/pi-reprompt.git"
+	},
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi-extension"
+	],
+	"files": [
+		"src",
+		"docs",
+		"LICENSE",
+		"README.md",
+		"AGENTS.md",
+		"GLOSSARY.md"
+	],
+	"pi": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"test": "node --test \"test/**/*.test.ts\"",
+		"check": "tsc --noEmit"
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-agent-core": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*",
+		"typebox": "*"
+	},
+	"devDependencies": {
+		"@types/node": "^24.0.0",
+		"typescript": "^5.9.0"
+	}
+}
